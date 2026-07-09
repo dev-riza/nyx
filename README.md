@@ -1,6 +1,6 @@
 # Nyx AI Assistant 
 
-A locally-hosted voice assistant running on Raspberry Pi 4, inspired by Jarvis from Iron Man.
+A locally-hosted voice assistant running on Raspberry Pi 4.
 
 ## Features
 - 🎙️ Wake word detection ("Nyx")
