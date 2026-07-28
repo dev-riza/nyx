@@ -17,6 +17,7 @@ from tts import speak, is_speaking
 from timer import start_timer, check_timers, cancel_timers, is_timer_request, is_timer_check, is_timer_cancel, parse_timer
 from memory import load_memory, build_system_prompt, update_memory_from_session
 from search import web_search, needs_search
+from gmail import read_emails, send_email, get_calendar_events
 
 def get_mic_device():
     result = subprocess.run(["arecord", "-l"], capture_output=True, text=True)
@@ -94,6 +95,44 @@ def ask_ai(user_input, messages):
         print(f"ask_ai error: {e}")
         speak("Sorry, I ran into an error.")
         messages.pop()
+
+def handle_send_email(messages):
+    speak("Who should I send it to?")
+    filepath = record_with_vad(max_duration=10)
+    if not filepath:
+        speak("I didn't catch that.")
+        return
+    to = transcribe(filepath)
+    print(f"To: {to}")
+
+    speak("What should the subject be?")
+    filepath = record_with_vad(max_duration=10)
+    if not filepath:
+        speak("I didn't catch that.")
+        return
+    subject = transcribe(filepath)
+    print(f"Subject: {subject}")
+
+    speak("What should I say in the email?")
+    filepath = record_with_vad(max_duration=15)
+    if not filepath:
+        speak("I didn't catch that.")
+        return
+    body = transcribe(filepath)
+    print(f"Body: {body}")
+
+    speak(f"Sending email to {to} with subject {subject}. Is that correct? Say yes or no.")
+    filepath = record_with_vad(max_duration=5)
+    if filepath:
+        confirm = transcribe(filepath)
+        if "yes" in confirm or "да" in confirm:
+            success = send_email(to, subject, body)
+            if success:
+                speak("Email sent successfully.")
+            else:
+                speak("Sorry, I couldn't send the email.")
+        else:
+            speak("Email cancelled.")
 
 def record_audio_fixed(duration=3, samplerate=16000):
     subprocess.run(
@@ -195,7 +234,7 @@ try:
 
         print(f"Heard: '{text}'")
 
-        if not (contains_wake_word(text) and len(text.split()) <= 4):
+        if not contains_wake_word(text):
             continue
 
         speak("Yes, I am here.")
@@ -230,7 +269,15 @@ try:
                 speak("Goodbye.")
                 raise KeyboardInterrupt
 
-            if is_timer_check(user_input):
+            if any(word in user_input for word in ["read my emails", "check my emails", "any emails", "unread emails", "почта", "письма"]):
+                result = read_emails()
+                speak(result)
+            elif any(word in user_input for word in ["my calendar", "my schedule", "upcoming events", "what's on", "календарь", "расписание"]):
+                result = get_calendar_events()
+                speak(result)
+            elif "send email" in user_input or "отправь письмо" in user_input:
+                handle_send_email(messages)
+            elif is_timer_check(user_input):
                 check_timers()
             elif is_timer_cancel(user_input):
                 cancel_timers()
