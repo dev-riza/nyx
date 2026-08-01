@@ -7,7 +7,7 @@ is_speaking = False
 
 def is_russian(text):
     russian_count = sum(1 for c in text if c in RUSSIAN_CHARS)
-    return russian_count > len(text) * 0.3
+    return russian_count > len(text) * 0.1
 
 def speak(text):
     global is_speaking

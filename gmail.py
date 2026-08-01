@@ -40,7 +40,7 @@ def read_emails(max_results=5):
         ).execute()
         messages = results.get('messages', [])
         if not messages:
-            return "No unread emails."
+            return "You have no unread emails."
         emails = []
         for msg in messages[:3]:
             msg_data = service.users().messages().get(
@@ -48,10 +48,12 @@ def read_emails(max_results=5):
                 metadataHeaders=['From', 'Subject']
             ).execute()
             headers = {h['name']: h['value'] for h in msg_data['payload']['headers']}
-            sender = headers.get('From', 'Unknown')
+            sender = headers.get('From', 'Unknown').split('<')[0].strip()
             subject = headers.get('Subject', 'No subject')
-            emails.append(f"From {sender}: {subject}")
-        return " | ".join(emails)
+            emails.append(f"{sender} says {subject}")
+        count = len(emails)
+        intro = f"You have {count} unread emails. "
+        return intro + ". ".join(emails)
     except Exception as e:
         return f"Could not read emails: {e}"
 

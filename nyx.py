@@ -44,9 +44,46 @@ def transcribe(filepath):
     result = response.json()
     return result.get("text", "").strip().lower()
 
+def clean_email(text):
+    text = text.replace(" at ", "@")
+    text = text.replace(" dot ", ".")
+    text = text.replace("ə", "a")
+    text = text.replace("to ", "")
+    text = text.replace(" ", "")
+    text = text.strip()
+    return text
+
 def contains_wake_word(text):
     pattern = r'\b(nyx|nix|nick|nicks|mix|niece|phoenix|next|naked|никс)\b'
     return bool(re.search(pattern, text))
+
+def process_command(user_input, messages):
+    print(f"You: {user_input}")
+
+    if any(word in user_input for word in ["stop", "goodbye", "стоп", "пока"]):
+        speak("Goodbye.")
+        raise KeyboardInterrupt
+
+    if any(word in user_input for word in ["read my email", "read my emails", "check my email", "check my emails", "any emails", "unread emails", "latest email", "new email", "почта", "письма"]):
+        result = read_emails()
+        speak(result)
+    elif any(word in user_input for word in ["my calendar", "my schedule", "upcoming events", "what's on", "календарь", "расписание"]):
+        result = get_calendar_events()
+        speak(result)
+    elif any(word in user_input for word in ["send email", "send an email", "write an email", "email to", "отправь письмо", "напиши письмо"]):
+        handle_send_email(messages)
+    elif is_timer_check(user_input):
+        check_timers()
+    elif is_timer_cancel(user_input):
+        cancel_timers()
+    elif is_timer_request(user_input):
+        seconds, label = parse_timer(user_input)
+        if seconds:
+            start_timer(seconds, label)
+        else:
+            speak("I didn't catch the time. Try saying something like set a timer for 5 minutes.")
+    else:
+        ask_ai(user_input, messages)
 
 def ask_ai(user_input, messages):
     messages.append({"role": "user", "content": user_input})
@@ -98,14 +135,17 @@ def ask_ai(user_input, messages):
 
 def handle_send_email(messages):
     speak("Who should I send it to?")
+    time.sleep(0.5)
     filepath = record_with_vad(max_duration=10)
     if not filepath:
         speak("I didn't catch that.")
         return
-    to = transcribe(filepath)
+    to_raw = transcribe(filepath)
+    to = clean_email(to_raw)
     print(f"To: {to}")
 
     speak("What should the subject be?")
+    time.sleep(0.5)
     filepath = record_with_vad(max_duration=10)
     if not filepath:
         speak("I didn't catch that.")
@@ -114,6 +154,7 @@ def handle_send_email(messages):
     print(f"Subject: {subject}")
 
     speak("What should I say in the email?")
+    time.sleep(0.5)
     filepath = record_with_vad(max_duration=15)
     if not filepath:
         speak("I didn't catch that.")
@@ -122,17 +163,30 @@ def handle_send_email(messages):
     print(f"Body: {body}")
 
     speak(f"Sending email to {to} with subject {subject}. Is that correct? Say yes or no.")
-    filepath = record_with_vad(max_duration=5)
-    if filepath:
-        confirm = transcribe(filepath)
-        if "yes" in confirm or "да" in confirm:
+    time.sleep(0.5)
+    filepath = record_with_vad(max_duration=8)
+    if not filepath:
+        speak("No response, email cancelled.")
+        return
+
+    confirm = transcribe(filepath)
+    print(f"Confirmation heard: {confirm}")
+    confirm_clean = confirm.replace(" ", "").lower()
+
+    if any(word in confirm_clean for word in ["yes", "yeah", "yep", "correct", "sure", "да", "конечно"]):
+        try:
             success = send_email(to, subject, body)
             if success:
                 speak("Email sent successfully.")
             else:
                 speak("Sorry, I couldn't send the email.")
-        else:
-            speak("Email cancelled.")
+        except Exception as e:
+            print(f"Send error: {e}")
+            speak("Sorry, something went wrong sending the email.")
+    elif any(word in confirm_clean for word in ["no", "nope", "нет"]):
+        speak("Email cancelled.")
+    else:
+        speak("I didn't catch that, email cancelled.")
 
 def record_audio_fixed(duration=3, samplerate=16000):
     subprocess.run(
@@ -237,7 +291,14 @@ try:
         if not contains_wake_word(text):
             continue
 
-        speak("Yes, I am here.")
+        command = re.sub(r'\b(nyx|nix|nick|nicks|mix|niece|phoenix|next|naked|никс)\b', '', text).strip()
+        command = re.sub(r'^(hey|ok|okay|hi|hello)\s*', '', command).strip()
+        command = re.sub(r'^[,.\s]+', '', command).strip()
+
+        if command:
+            process_command(command, messages)
+        else:
+            speak("Yes, I am here.")
 
         consecutive_silent = 0
         while True:
@@ -263,32 +324,7 @@ try:
             if not user_input:
                 continue
 
-            print("You:", user_input)
-
-            if any(word in user_input for word in ["stop", "goodbye", "стоп", "пока"]):
-                speak("Goodbye.")
-                raise KeyboardInterrupt
-
-            if any(word in user_input for word in ["read my emails", "check my emails", "any emails", "unread emails", "почта", "письма"]):
-                result = read_emails()
-                speak(result)
-            elif any(word in user_input for word in ["my calendar", "my schedule", "upcoming events", "what's on", "календарь", "расписание"]):
-                result = get_calendar_events()
-                speak(result)
-            elif "send email" in user_input or "отправь письмо" in user_input:
-                handle_send_email(messages)
-            elif is_timer_check(user_input):
-                check_timers()
-            elif is_timer_cancel(user_input):
-                cancel_timers()
-            elif is_timer_request(user_input):
-                seconds, label = parse_timer(user_input)
-                if seconds:
-                    start_timer(seconds, label)
-                else:
-                    speak("I didn't catch the time. Try saying something like set a timer for 5 minutes.")
-            else:
-                ask_ai(user_input, messages)
+            process_command(user_input, messages)
 
 except KeyboardInterrupt:
     print("Stopping...")

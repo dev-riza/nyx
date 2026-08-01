@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
 import os
+from dotenv import load_dotenv
 
-GROQ_API_KEY = "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"
-CEREBRAS_API_KEY = "csk-pev8yxx8wv3mmcd5crj22ntwmpyx39jy48mpvrhx2rhpn6cc"
+load_dotenv()
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY")
 
 GROQ_WHISPER_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 CEREBRAS_URL = "https://api.cerebras.ai/v1/chat/completions"
