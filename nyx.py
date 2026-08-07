@@ -17,7 +17,7 @@ from tts import speak, is_speaking
 from timer import start_timer, check_timers, cancel_timers, is_timer_request, is_timer_check, is_timer_cancel, parse_timer
 from memory import load_memory, build_system_prompt, update_memory_from_session
 from search import web_search, needs_search
-from gmail import read_emails, send_email, get_calendar_events
+from googleapi import read_emails, send_email, get_calendar_events, search_drive
 
 def get_mic_device():
     result = subprocess.run(["arecord", "-l"], capture_output=True, text=True)
@@ -45,13 +45,21 @@ def transcribe(filepath):
     return result.get("text", "").strip().lower()
 
 def clean_email(text):
+    text = text.lower()
     text = text.replace(" at ", "@")
     text = text.replace(" dot ", ".")
     text = text.replace("ə", "a")
-    text = text.replace("to ", "")
+    text = text.replace("ä", "a")
+    text = text.replace("dotcom", ".com")
+    text = text.replace("dot com", ".com")
+    text = text.replace("yandexcom", "yandex.com")
+    text = text.replace("gmailcom", "gmail.com")
+    text = text.replace("hotmailcom", "hotmail.com")
+    for prefix in ["to ", "send to ", "email to ", "send it to "]:
+        if text.startswith(prefix):
+            text = text[len(prefix):]
     text = text.replace(" ", "")
-    text = text.strip()
-    return text
+    return text.strip()
 
 def contains_wake_word(text):
     pattern = r'\b(nyx|nix|nick|nicks|mix|niece|phoenix|next|naked|никс)\b'
@@ -70,6 +78,14 @@ def process_command(user_input, messages):
     elif any(word in user_input for word in ["my calendar", "my schedule", "upcoming events", "what's on", "календарь", "расписание"]):
         result = get_calendar_events()
         speak(result)
+    elif any(word in user_input for word in ["search drive", "find file", "find in drive", "найди файл"]):
+        speak("What should I search for?")
+        time.sleep(0.5)
+        filepath = record_with_vad(max_duration=10)
+        if filepath:
+            query = transcribe(filepath)
+            result = search_drive(query)
+            speak(result)
     elif any(word in user_input for word in ["send email", "send an email", "write an email", "email to", "отправь письмо", "напиши письмо"]):
         handle_send_email(messages)
     elif is_timer_check(user_input):
@@ -134,15 +150,32 @@ def ask_ai(user_input, messages):
         messages.pop()
 
 def handle_send_email(messages):
-    speak("Who should I send it to?")
+    speak("Who should I send it to? Please say the email address clearly, saying at for the @ symbol and dot for periods.")
     time.sleep(0.5)
-    filepath = record_with_vad(max_duration=10)
+    filepath = record_with_vad(max_duration=15)
     if not filepath:
         speak("I didn't catch that.")
         return
     to_raw = transcribe(filepath)
     to = clean_email(to_raw)
     print(f"To: {to}")
+
+    speak(f"I heard {to_raw}. The email address is {to}. Is that correct? Say yes or no.")
+    time.sleep(0.5)
+    filepath = record_with_vad(max_duration=6)
+    if filepath:
+        confirm = transcribe(filepath)
+        confirm_clean = confirm.replace(" ", "").lower()
+        if not any(word in confirm_clean for word in ["yes", "yeah", "yep", "correct", "sure", "да", "конечно"]):
+            speak("Let's try again. Please say the email address slowly and clearly.")
+            time.sleep(0.5)
+            filepath = record_with_vad(max_duration=15)
+            if not filepath:
+                speak("I didn't catch that.")
+                return
+            to_raw = transcribe(filepath)
+            to = clean_email(to_raw)
+            print(f"To (retry): {to}")
 
     speak("What should the subject be?")
     time.sleep(0.5)
@@ -162,7 +195,7 @@ def handle_send_email(messages):
     body = transcribe(filepath)
     print(f"Body: {body}")
 
-    speak(f"Sending email to {to} with subject {subject}. Is that correct? Say yes or no.")
+    speak(f"Ready to send to {to} with subject {subject}. Shall I send it? Say yes or no.")
     time.sleep(0.5)
     filepath = record_with_vad(max_duration=8)
     if not filepath:
