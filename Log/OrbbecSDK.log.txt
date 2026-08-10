@@ -1,0 +1,24 @@
+[08/10 10:53:36.533986][error][1756][UsbEnumeratorLibusb.cpp:159] Invalid descriptor index: 0
+[08/10 10:53:36.534129][error][1756][UsbEnumeratorLibusb.cpp:424] Failed to query USB device serial number
+[08/10 10:53:36.534818][error][1756][UsbEnumeratorLibusb.cpp:159] Invalid descriptor index: 0
+[08/10 10:53:36.534872][error][1756][UsbEnumeratorLibusb.cpp:440] Failed to query USB device interface name. SN: 
+[08/10 10:53:36.536933][info][1756][LinuxUsbPal.cpp:334] Create PollingDeviceWatcher!
+[08/10 10:53:36.536954][info][1756][DeviceManager.cpp:25] Current found device(s): (0)
+[08/10 10:53:36.536959][info][1756][DeviceManager.cpp:405] Enable net device enumeration: true
+[08/10 10:53:37.540252][info][1756][DeviceManager.cpp:25] Current device(s) list: (0)
+[08/10 10:54:34.038463][error][1844][UsbEnumeratorLibusb.cpp:159] Invalid descriptor index: 0
+[08/10 10:54:34.038590][error][1844][UsbEnumeratorLibusb.cpp:424] Failed to query USB device serial number
+[08/10 10:54:34.039328][error][1844][UsbEnumeratorLibusb.cpp:159] Invalid descriptor index: 0
+[08/10 10:54:34.039416][error][1844][UsbEnumeratorLibusb.cpp:440] Failed to query USB device interface name. SN: 
+[08/10 10:54:34.041392][info][1844][LinuxUsbPal.cpp:334] Create PollingDeviceWatcher!
+[08/10 10:54:34.041413][info][1844][DeviceManager.cpp:25] Current found device(s): (0)
+[08/10 10:54:34.041420][info][1844][DeviceManager.cpp:405] Enable net device enumeration: true
+[08/10 10:54:35.044734][info][1844][DeviceManager.cpp:25] Current device(s) list: (0)
+[08/10 10:57:12.161351][error][1954][UsbEnumeratorLibusb.cpp:159] Invalid descriptor index: 0
+[08/10 10:57:12.161480][error][1954][UsbEnumeratorLibusb.cpp:424] Failed to query USB device serial number
+[08/10 10:57:12.162653][error][1954][UsbEnumeratorLibusb.cpp:159] Invalid descriptor index: 0
+[08/10 10:57:12.162735][error][1954][UsbEnumeratorLibusb.cpp:440] Failed to query USB device interface name. SN: 
+[08/10 10:57:12.164699][info][1954][LinuxUsbPal.cpp:334] Create PollingDeviceWatcher!
+[08/10 10:57:12.164720][info][1954][DeviceManager.cpp:25] Current found device(s): (0)
+[08/10 10:57:12.164727][info][1954][DeviceManager.cpp:405] Enable net device enumeration: true
+[08/10 10:57:13.168058][info][1954][DeviceManager.cpp:25] Current device(s) list: (0)
