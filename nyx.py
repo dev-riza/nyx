@@ -18,6 +18,7 @@ from timer import start_timer, check_timers, cancel_timers, is_timer_request, is
 from memory import load_memory, build_system_prompt, update_memory_from_session
 from search import web_search, needs_search
 from googleapi import read_emails, send_email, get_calendar_events, search_drive
+from vision import analyze_scene
 
 def get_mic_device():
     result = subprocess.run(["arecord", "-l"], capture_output=True, text=True)
@@ -98,6 +99,10 @@ def process_command(user_input, messages):
             start_timer(seconds, label)
         else:
             speak("I didn't catch the time. Try saying something like set a timer for 5 minutes.")
+    elif any(word in user_input for word in ["what do you see", "look around", "what's in front", "describe the room", "что видишь", "осмотрись"]):
+        speak("Let me take a look...")
+        result = analyze_scene()
+        speak(result)
     else:
         ask_ai(user_input, messages)
 
