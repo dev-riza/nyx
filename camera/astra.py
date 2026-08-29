@@ -1,11 +1,23 @@
-# Orbbec Astra camera driver - reverse engineered
-# Protocol: PS1080 OpenNI2 vendor USB protocol
+# camera/astra.py
+# Orbbec Astra camera driver
 # VID:PID = 2bc5:0401
-
-import usb.core, usb.util, struct, numpy as np
+import os
+import subprocess
+import struct
+import threading
+import time
+import usb.core
+import usb.util
+import numpy as np
 
 MAGIC_HOST = 0x4d47
 MAGIC_FW = 0x4252
+
+CAMERA_DIR = os.path.dirname(__file__)
+CAPTURE_COLOR_BIN = os.path.join(CAMERA_DIR, 'capture_color')
+CAMERA_STREAM_BIN = os.path.join(CAMERA_DIR, 'camera_stream')
+OPENNI2_DRIVERS_PATH = '/usr/lib/aarch64-linux-gnu/OpenNI2/Drivers'
+
 
 def send_cmd(dev, opcode, payload=b''):
     size = len(payload) // 2
@@ -13,8 +25,10 @@ def send_cmd(dev, opcode, payload=b''):
     dev.ctrl_transfer(0x40, 0, 0, 0, header + payload, timeout=3000)
     return dev.ctrl_transfer(0xC0, 0, 0, 0, 512, timeout=3000).tobytes()
 
+
 def set_param(dev, param, value):
     return send_cmd(dev, 3, struct.pack('<HH', param, value))
+
 
 def open_device():
     dev = usb.core.find(idVendor=0x2bc5, idProduct=0x0401)
@@ -24,30 +38,123 @@ def open_device():
         try:
             if dev.is_kernel_driver_active(i):
                 dev.detach_kernel_driver(i)
-        except: pass
+        except Exception:
+            pass
     dev.set_configuration()
     usb.util.claim_interface(dev, 0)
-    send_cmd(dev, 6, struct.pack('<H', 1))  # SetMode PS
+    send_cmd(dev, 6, struct.pack('<H', 1))
     return dev
+
 
 def close_device(dev):
     usb.util.release_interface(dev, 0)
 
-def uyvy_to_rgb(data, width=640, height=476):
-    arr = np.frombuffer(data, dtype=np.uint8).reshape(-1, 4)
-    u  = arr[:,0].astype(float) - 128
-    y0 = arr[:,1].astype(float)
-    v  = arr[:,2].astype(float) - 128
-    y1 = arr[:,3].astype(float)
-    def conv(y):
-        r = np.clip(y + 1.402*v, 0, 255).astype(np.uint8)
-        g = np.clip(y - 0.344*u - 0.714*v, 0, 255).astype(np.uint8)
-        b = np.clip(y + 1.772*u, 0, 255).astype(np.uint8)
-        return np.stack([r,g,b], axis=1)
-    rgb = np.zeros((len(arr)*2, 3), dtype=np.uint8)
-    rgb[0::2] = conv(y0)
-    rgb[1::2] = conv(y1)
-    return rgb[:width*height].reshape(height, width, 3)
+
+def get_color_frame(dev=None):
+    if not os.path.exists(CAPTURE_COLOR_BIN):
+        print(f"capture_color binary not found at {CAPTURE_COLOR_BIN}")
+        return None
+    try:
+        env = os.environ.copy()
+        env['OPENNI2_DRIVERS_PATH'] = OPENNI2_DRIVERS_PATH
+        result = subprocess.run(
+            ['sudo', '-E', CAPTURE_COLOR_BIN],
+            env=env,
+            capture_output=True,
+            timeout=10
+        )
+        if result.returncode != 0:
+            print("capture_color failed:", result.stderr.decode(errors='replace'))
+            return None
+        return _parse_frame_bytes(result.stdout)
+    except Exception as e:
+        print(f"get_color_frame error: {e}")
+        return None
+
+
+def _parse_frame_bytes(stdout):
+    newline_idx = stdout.index(b'\n')
+    header = stdout[:newline_idx].decode().strip()
+    width, height = map(int, header.split())
+    if width == 0 or height == 0:
+        return None
+    raw = stdout[newline_idx + 1:]
+    expected = width * height * 3
+    if len(raw) != expected:
+        print(f"unexpected frame size: got {len(raw)}, expected {expected}")
+        return None
+    return np.frombuffer(raw, dtype=np.uint8).reshape(height, width, 3)
+
+
+class CameraServer:
+    def __init__(self):
+        self._proc = None
+        self._lock = threading.Lock()
+
+    def start(self, timeout=15):
+        if self._proc is not None and self._proc.poll() is None:
+            return
+        if not os.path.exists(CAMERA_STREAM_BIN):
+            raise FileNotFoundError(f"camera_stream binary not found at {CAMERA_STREAM_BIN}")
+        env = os.environ.copy()
+        env['OPENNI2_DRIVERS_PATH'] = OPENNI2_DRIVERS_PATH
+        self._proc = subprocess.Popen(
+            ['sudo', '-E', CAMERA_STREAM_BIN],
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            line = self._proc.stderr.readline()
+            if not line:
+                break
+            if b'READY' in line:
+                return
+        if self._proc.poll() is not None:
+            stderr_output = self._proc.stderr.read().decode(errors='replace')
+            raise RuntimeError(f"camera_stream failed to start: {stderr_output}")
+        raise TimeoutError("camera_stream did not report READY in time")
+
+    def get_frame(self, timeout=5):
+        if self._proc is None or self._proc.poll() is not None:
+            return None
+        with self._lock:
+            try:
+                self._proc.stdin.write(b"GET\n")
+                self._proc.stdin.flush()
+                header_line = self._proc.stdout.readline()
+                if not header_line:
+                    return None
+                width, height = map(int, header_line.decode().strip().split())
+                if width == 0 or height == 0:
+                    return None
+                expected = width * height * 3
+                raw = self._proc.stdout.read(expected)
+                if len(raw) != expected:
+                    return None
+                return np.frombuffer(raw, dtype=np.uint8).reshape(height, width, 3)
+            except Exception as e:
+                print(f"CameraServer.get_frame error: {e}")
+                return None
+
+    def stop(self):
+        if self._proc is None:
+            return
+        try:
+            if self._proc.poll() is None:
+                self._proc.stdin.write(b"QUIT\n")
+                self._proc.stdin.flush()
+                self._proc.wait(timeout=5)
+        except Exception:
+            self._proc.kill()
+        self._proc = None
+
+    @property
+    def is_running(self):
+        return self._proc is not None and self._proc.poll() is None
+
 
 def unpack11to16(data):
     output = []
@@ -66,42 +173,23 @@ def unpack11to16(data):
         i += 11
     return np.array(output, dtype=np.uint16)
 
-def get_color_frame(dev):
-    set_param(dev, 5, 1)  # PARAM_GENERAL_STREAM0_MODE = COLOR
-    frame_packets = {}
-    frame_started = False
-    for _ in range(1000):
-        try:
-            pkt = bytes(dev.read(0x82, 3072, timeout=1000))
-            magic, ntype, packet_id, _ = struct.unpack_from('<HHHH', pkt, 0)
-            if magic != MAGIC_FW: continue
-            if ntype == 0x8100:
-                if frame_started and len(frame_packets) > 40:
-                    break
-                frame_started = True
-                frame_packets = {}
-            elif ntype == 0x8200 and frame_started:
-                frame_packets[packet_id] = bytes(pkt[8:8+3064])
-        except: continue
-    pixel_data = bytearray()
-    for k in sorted(frame_packets.keys()):
-        pixel_data.extend(frame_packets[k])
-    return uyvy_to_rgb(bytes(pixel_data))
 
 def get_depth_frame(dev):
-    set_param(dev, 6, 2)  # PARAM_GENERAL_STREAM1_MODE = DEPTH
+    set_param(dev, 6, 2)
     pixel_data = bytearray()
     frame_started = False
     while len(pixel_data) < 106200:
         try:
             pkt = bytes(dev.read(0x81, 3072, timeout=2000))
             magic, ntype, _, _ = struct.unpack_from('<HHHH', pkt, 0)
-            if magic != MAGIC_FW: continue
+            if magic != MAGIC_FW:
+                continue
             if ntype == 0x7100:
                 frame_started = True
                 pixel_data = bytearray()
             elif ntype == 0x7200 and frame_started:
                 pixel_data.extend(pkt[8:8+3064])
-        except: break
+        except Exception:
+            break
     depth = unpack11to16(bytes(pixel_data))[:76800].reshape(240, 320)
     return depth

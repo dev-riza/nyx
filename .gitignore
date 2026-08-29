@@ -219,3 +219,11 @@ __marimo__/
 token.json
 credentials.json
 auth.py
+
+# Compiled binaries (rebuild with g++, see SETUP notes in camera/*.cpp)
+camera/camera_stream
+camera/capture_color
+
+# YOLO model files (regenerate: YOLO('yolov8n.pt').export(format='ncnn'))
+yolov8n.pt
+yolov8n_ncnn_model/
