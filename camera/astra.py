@@ -1,6 +1,28 @@
 # camera/astra.py
 # Orbbec Astra camera driver
 # VID:PID = 2bc5:0401
+#
+# COLOR: fixed via OpenNI2. The camera's firmware defaults to sending
+# JPEG-compressed color data, and the PS1080 driver's JPEG decoder
+# corrupts frames on this unit -- that caused tilted/doubled images from
+# the old raw-pyusb approach. The fix forces the firmware into
+# uncompressed mode before streaming (XN_STREAM_PROPERTY_INPUT_FORMAT = 5).
+#
+# CONCURRENCY: this camera's USB connection is fragile -- overlapping
+# opens (e.g. PresenceMonitor and EmotionMonitor both polling around the
+# same time) can wedge the device into a state that needs a physical
+# unplug/replug to recover. get_color_frame() uses a lock so only one
+# caller can access the camera at a time; everyone else waits their turn
+# instead of racing for the USB device.
+#
+# CameraServer (persistent capture) still has a known unresolved bug --
+# frames after the first one in a session return garbage/noise data under
+# sustained polling. Not currently used by anything; kept here for future
+# debugging. Use get_color_frame() for all real capture needs.
+#
+# DEPTH: still using the original raw-pyusb protocol. Known, unresolved
+# corruption issue -- separate root cause from the color bug.
+
 import os
 import subprocess
 import struct
@@ -17,6 +39,12 @@ CAMERA_DIR = os.path.dirname(__file__)
 CAPTURE_COLOR_BIN = os.path.join(CAMERA_DIR, 'capture_color')
 CAMERA_STREAM_BIN = os.path.join(CAMERA_DIR, 'camera_stream')
 OPENNI2_DRIVERS_PATH = '/usr/lib/aarch64-linux-gnu/OpenNI2/Drivers'
+
+# Serializes all access to get_color_frame() -- prevents concurrent
+# background monitors (PresenceMonitor, EmotionMonitor) and on-demand
+# voice commands from opening the camera at the same time, which can
+# wedge the device's USB state.
+_camera_lock = threading.Lock()
 
 
 def send_cmd(dev, opcode, payload=b''):
@@ -51,25 +79,36 @@ def close_device(dev):
 
 
 def get_color_frame(dev=None):
+    """Capture one 640x480 RGB888 color frame by opening a fresh camera
+    connection. dev is accepted for backwards compatibility but unused.
+    Returns a (480, 640, 3) uint8 numpy array, or None on failure.
+
+    Thread-safe: only one caller can access the camera at a time.
+    Concurrent callers will block and wait their turn rather than racing
+    for the USB device (which can wedge it).
+    """
     if not os.path.exists(CAPTURE_COLOR_BIN):
-        print(f"capture_color binary not found at {CAPTURE_COLOR_BIN}")
+        print(f"capture_color binary not found at {CAPTURE_COLOR_BIN} -- build it first")
         return None
-    try:
-        env = os.environ.copy()
-        env['OPENNI2_DRIVERS_PATH'] = OPENNI2_DRIVERS_PATH
-        result = subprocess.run(
-            ['sudo', '-E', CAPTURE_COLOR_BIN],
-            env=env,
-            capture_output=True,
-            timeout=10
-        )
-        if result.returncode != 0:
-            print("capture_color failed:", result.stderr.decode(errors='replace'))
+
+    with _camera_lock:
+        try:
+            env = os.environ.copy()
+            env['OPENNI2_DRIVERS_PATH'] = OPENNI2_DRIVERS_PATH
+            result = subprocess.run(
+                ['sudo', '-E', CAPTURE_COLOR_BIN],
+                env=env,
+                capture_output=True,
+                timeout=10
+            )
+            if result.returncode != 0:
+                print("capture_color failed:", result.stderr.decode(errors='replace'))
+                return None
+
+            return _parse_frame_bytes(result.stdout)
+        except Exception as e:
+            print(f"get_color_frame error: {e}")
             return None
-        return _parse_frame_bytes(result.stdout)
-    except Exception as e:
-        print(f"get_color_frame error: {e}")
-        return None
 
 
 def _parse_frame_bytes(stdout):
@@ -87,6 +126,12 @@ def _parse_frame_bytes(stdout):
 
 
 class CameraServer:
+    """Persistent camera server -- KNOWN BUG, not currently used. Frames
+    after the first one in a session return garbage/noise data under
+    sustained polling. Kept here for future debugging; do not wire this
+    into anything until the underlying issue is found. Use
+    get_color_frame() instead."""
+
     def __init__(self):
         self._proc = None
         self._lock = threading.Lock()

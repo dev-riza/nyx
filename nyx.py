@@ -10,8 +10,8 @@ import os
 import webrtcvad
 
 from config import (
-    GROQ_API_KEY, CEREBRAS_URL, GROQ_WHISPER_URL,
-    cerebras_headers
+    GROQ_API_KEY, GROQ_CHAT_URL, GROQ_WHISPER_URL,
+    groq_headers
 )
 from tts import speak, is_speaking
 from timer import start_timer, check_timers, cancel_timers, is_timer_request, is_timer_check, is_timer_cancel, parse_timer
@@ -19,6 +19,7 @@ from memory import load_memory, build_system_prompt, update_memory_from_session
 from search import web_search, needs_search
 from googleapi import read_emails, send_email, get_calendar_events, search_drive
 from vision import analyze_scene
+from detect import detect_objects, describe_detections, PresenceMonitor, EmotionMonitor
 
 def get_mic_device():
     result = subprocess.run(["arecord", "-l"], capture_output=True, text=True)
@@ -66,6 +67,19 @@ def contains_wake_word(text):
     pattern = r'\b(nyx|nix|nick|nicks|mix|niece|phoenix|next|naked|никс)\b'
     return bool(re.search(pattern, text))
 
+def check_in_on_mood():
+    """Called periodically from the main loop. Speaks up once if a
+    sustained low-mood pattern is detected, then stays quiet until the
+    mood improves (auto-resets once the latest read looks okay again)."""
+    latest = emotion_monitor.latest
+    if latest and not emotion_monitor._seems_concerning(latest):
+        emotion_monitor.reset_check_in()
+        return
+
+    if emotion_monitor.should_check_in():
+        speak("Hey, is everything okay? You seem a little off today.")
+        emotion_monitor.mark_checked_in()
+
 def process_command(user_input, messages):
     print(f"You: {user_input}")
 
@@ -103,6 +117,9 @@ def process_command(user_input, messages):
         speak("Let me take a look...")
         result = analyze_scene()
         speak(result)
+    elif any(word in user_input for word in ["who's here", "who is here", "who's in the room", "who is in the room", "is anyone here", "is someone here", "any people", "any person", "how many people", "anybody here", "кто здесь"]):
+        result = presence_monitor.describe_now()
+        speak(result)
     else:
         ask_ai(user_input, messages)
 
@@ -117,23 +134,34 @@ def ask_ai(user_input, messages):
             print(f"Search result: {search_result}")
 
     send_messages = messages.copy()
-    if search_context:
+    extra_context = search_context
+
+    mood = emotion_monitor.latest
+    if mood and emotion_monitor._seems_concerning(mood):
+        extra_context += (
+            f"\n\n[The person may currently seem {mood.lower()} based on a "
+            f"casual visual read -- this is just a hint, not certain. If it "
+            f"feels natural, you can be a bit gentler or warmer in tone, "
+            f"but don't mention that you're reading their mood or comment "
+            f"on their appearance directly.]"
+        )
+
+    if extra_context:
         send_messages[-1] = {
             "role": "user",
-            "content": user_input + search_context
+            "content": user_input + extra_context
         }
 
     try:
         data = {
-            "model": "gpt-oss-120b",
+            "model": "openai/gpt-oss-120b",
             "messages": send_messages,
             "max_tokens": 250,
-            "stream": False,
-            "reasoning_effort": "low"
+            "stream": False
         }
 
         print("Thinking...")
-        response = requests.post(CEREBRAS_URL, headers=cerebras_headers, json=data, timeout=15)
+        response = requests.post(GROQ_CHAT_URL, headers=groq_headers, json=data, timeout=15)
         result = response.json()
 
         if "choices" not in result:
@@ -297,6 +325,14 @@ MIC_DEVICE = get_mic_device()
 print(f"Using mic device: {MIC_DEVICE}")
 set_volume()
 
+presence_monitor = PresenceMonitor(poll_interval=5)
+presence_monitor.start()
+print("Presence monitor started (background YOLO polling every 5s).")
+
+emotion_monitor = EmotionMonitor(poll_interval=60)
+emotion_monitor.start()
+print("Emotion monitor started (background check every 60s).")
+
 messages = [
     {"role": "system", "content": build_system_prompt(memory)}
 ]
@@ -311,6 +347,7 @@ try:
             continue
 
         record_audio_fixed(duration=3)
+        check_in_on_mood()
 
         if is_silent("/tmp/audio.wav"):
             continue
@@ -367,5 +404,7 @@ try:
 except KeyboardInterrupt:
     print("Stopping...")
 finally:
+    presence_monitor.stop()
+    emotion_monitor.stop()
     update_memory_from_session(messages, memory)
     print("Memory saved.")

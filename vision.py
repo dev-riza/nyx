@@ -62,3 +62,54 @@ def analyze_scene(prompt="Describe what you see in this scene briefly in 2-3 sen
         return "Could not analyze scene."
     except Exception as e:
         return f"Vision error: {e}"
+
+def analyze_emotion():
+    """Capture a frame and read apparent emotional state / body language.
+    Returns a short descriptive phrase, or None if camera unavailable.
+    This is a soft observation from a vision model, not a diagnosis --
+    treat it as a hint, never state it as fact to the user."""
+    img_arr = capture_frame()
+    if img_arr is None:
+        return None
+
+    img = Image.fromarray(img_arr)
+    buf = io.BytesIO()
+    img.save(buf, format='JPEG', quality=85)
+    img_b64 = base64.b64encode(buf.getvalue()).decode()
+
+    prompt = (
+        "Look at the person's face and posture in this image. In one short "
+        "phrase (under 12 words), describe their apparent mood or body "
+        "language -- e.g. 'relaxed and smiling', 'looks tired', 'seems "
+        "focused', 'appears a bit down'. If no person is clearly visible, "
+        "say 'no person visible'. Be tentative, not certain -- this is a "
+        "guess from a single image, not a diagnosis."
+    )
+
+    try:
+        response = requests.post(
+            'https://api.groq.com/openai/v1/chat/completions',
+            headers={'Authorization': f'Bearer {GROQ_API_KEY}', 'Content-Type': 'application/json'},
+            json={
+                'model': VISION_MODEL,
+                'messages': [{
+                    'role': 'user',
+                    'content': [
+                        {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{img_b64}'}},
+                        {'type': 'text', 'text': prompt}
+                    ]
+                }],
+                'max_tokens': 300
+            },
+            timeout=15
+        )
+        result = response.json()
+        if 'choices' in result:
+            content = result['choices'][0]['message']['content']
+            if '</think>' in content:
+                content = content.split('</think>')[-1].strip()
+            return content.strip()
+        return None
+    except Exception as e:
+        print(f"analyze_emotion error: {e}")
+        return None
