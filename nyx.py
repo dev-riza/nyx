@@ -18,8 +18,9 @@ from timer import start_timer, check_timers, cancel_timers, is_timer_request, is
 from memory import load_memory, build_system_prompt, update_memory_from_session
 from search import web_search, needs_search
 from googleapi import read_emails, send_email, get_calendar_events, search_drive
-from vision import analyze_scene
-from detect import detect_objects, describe_detections, PresenceMonitor, EmotionMonitor
+from vision import analyze_scene, capture_frame
+from detect import detect_objects, describe_detections, EmotionMonitor
+from body_language import PresenceMonitor, analyze_body
 
 def get_mic_device():
     result = subprocess.run(["arecord", "-l"], capture_output=True, text=True)
@@ -68,14 +69,10 @@ def contains_wake_word(text):
     return bool(re.search(pattern, text))
 
 def check_in_on_mood():
-    """Called periodically from the main loop. Speaks up once if a
-    sustained low-mood pattern is detected, then stays quiet until the
-    mood improves (auto-resets once the latest read looks okay again)."""
     latest = emotion_monitor.latest
     if latest and not emotion_monitor._seems_concerning(latest):
         emotion_monitor.reset_check_in()
         return
-
     if emotion_monitor.should_check_in():
         speak("Hey, is everything okay? You seem a little off today.")
         emotion_monitor.mark_checked_in()
@@ -117,9 +114,20 @@ def process_command(user_input, messages):
         speak("Let me take a look...")
         result = analyze_scene()
         speak(result)
-    elif any(word in user_input for word in ["who's here", "who is here", "who's in the room", "who is in the room", "is anyone here", "is someone here", "any people", "any person", "how many people", "anybody here", "кто здесь"]):
-        result = presence_monitor.describe_now()
-        speak(result)
+    elif any(word in user_input for word in ["who's here", "who is here", "who's in the room", "is anyone here", "кто здесь"]):
+        img = capture_frame()
+        if img is not None:
+            result = analyze_body(img)
+            speak(result['summary'])
+        else:
+            speak("Camera not available.")
+    elif any(word in user_input for word in ["my posture", "how am i sitting", "моя осанка"]):
+        img = capture_frame()
+        if img is not None:
+            result = analyze_body(img)
+            speak(result['summary'])
+        else:
+            speak("Camera not available.")
     else:
         ask_ai(user_input, messages)
 
@@ -298,7 +306,6 @@ def record_with_vad(max_duration=15, samplerate=16000):
                     break
 
     arecord.terminate()
-
     if voiced_frames < 3:
         return None
 
@@ -320,18 +327,31 @@ def is_silent(filepath, threshold=300):
         rms = audioop.rms(frames, wf.getsampwidth())
         return rms < threshold
 
+# Startup
 memory = load_memory()
 MIC_DEVICE = get_mic_device()
 print(f"Using mic device: {MIC_DEVICE}")
 set_volume()
 
-presence_monitor = PresenceMonitor(poll_interval=5)
-presence_monitor.start()
-print("Presence monitor started (background YOLO polling every 5s).")
+# Presence monitor - body language based
+def on_person_enter():
+    speak("Hey, welcome back.")
 
+def on_person_leave():
+    pass
+
+presence_monitor = PresenceMonitor(
+    on_enter=on_person_enter,
+    on_leave=on_person_leave,
+    check_interval=5.0
+)
+presence_monitor.start(capture_frame)
+print("Presence monitor started.")
+
+# Emotion monitor
 emotion_monitor = EmotionMonitor(poll_interval=60)
 emotion_monitor.start()
-print("Emotion monitor started (background check every 60s).")
+print("Emotion monitor started.")
 
 messages = [
     {"role": "system", "content": build_system_prompt(memory)}
