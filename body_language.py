@@ -184,6 +184,8 @@ class PresenceMonitor:
         self.running = False
 
     def _loop(self):
+        import time as _time
+        import tts as tts_module
         while self.running:
             try:
                 img = self.capture_fn()
@@ -192,6 +194,9 @@ class PresenceMonitor:
                     if now_present and not self.present:
                         self.present = True
                         if self.on_enter:
+                            _time.sleep(1.5)
+                            while tts_module.is_speaking:
+                                _time.sleep(0.5)
                             self.on_enter()
                     elif not now_present and self.present:
                         self.present = False
@@ -199,4 +204,4 @@ class PresenceMonitor:
                             self.on_leave()
             except Exception as e:
                 pass
-            time.sleep(self.check_interval)
+            _time.sleep(self.check_interval)

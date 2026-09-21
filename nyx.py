@@ -25,6 +25,11 @@ from body_language import PresenceMonitor, analyze_body
 def get_mic_device():
     result = subprocess.run(["arecord", "-l"], capture_output=True, text=True)
     for line in result.stdout.splitlines():
+        if "reSpeaker" in line or "XVF3800" in line:
+            match = re.search(r"card (\d+)", line)
+            if match:
+                return f"plughw:{match.group(1)},0"
+    for line in result.stdout.splitlines():
         if "USB Audio" in line or "USB" in line:
             match = re.search(r"card (\d+)", line)
             if match:
@@ -265,19 +270,18 @@ def handle_send_email(messages):
 def record_audio_fixed(duration=3, samplerate=16000):
     subprocess.run(
         ["arecord", "-D", MIC_DEVICE, "-f", "S16_LE",
-         "-r", str(samplerate), "-c", "1", "-d", str(duration), "-q", "/tmp/audio.wav"],
+         "-r", str(samplerate), "-c", "2", "-d", str(duration), "-q", "/tmp/audio.wav"],
         stderr=subprocess.DEVNULL
     )
     return "/tmp/audio.wav"
 
 def record_with_vad(max_duration=15, samplerate=16000):
-    vad = webrtcvad.Vad(2)
+    vad = webrtcvad.Vad(3)
     frame_duration = 30
     frame_size = int(samplerate * frame_duration / 1000) * 2
 
     arecord = subprocess.Popen(
-        ["arecord", "-D", MIC_DEVICE, "-f", "S16_LE",
-         "-r", str(samplerate), "-c", "1", "-q"],
+        ["arecord", "-D", MIC_DEVICE, "-f", "S16_LE", "-r", str(samplerate), "-c", "2", "-q"],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL
     )
@@ -306,7 +310,7 @@ def record_with_vad(max_duration=15, samplerate=16000):
                     break
 
     arecord.terminate()
-    if voiced_frames < 3:
+    if voiced_frames < 5:
         return None
 
     with wave.open("/tmp/audio.wav", "wb") as wf:
@@ -317,7 +321,7 @@ def record_with_vad(max_duration=15, samplerate=16000):
 
     return "/tmp/audio.wav"
 
-def is_silent(filepath, threshold=300):
+def is_silent(filepath, threshold=500):
     if not os.path.exists(filepath):
         return True
     with wave.open(filepath, 'rb') as wf:
@@ -419,8 +423,11 @@ try:
             if not user_input:
                 continue
 
-            process_command(user_input, messages)
+# Skip if transcription is just noise/punctuation
+            if command and len(command.strip('.?,! ')) >= 2:
+                process_command(command, messages)
 
+    
 except KeyboardInterrupt:
     print("Stopping...")
 finally:
