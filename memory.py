@@ -2,7 +2,7 @@
 import json
 import re
 import requests
-from config import MEMORY_FILE, CEREBRAS_URL, cerebras_headers
+from config import MEMORY_FILE, GROQ_CHAT_URL, groq_headers
 
 def load_memory():
     import os
@@ -17,6 +17,8 @@ def save_memory(memory):
 
 def build_system_prompt(memory):
     base = """You are Nyx, a highly intelligent AI assistant and companion — think Jarvis from Iron Man but with your own identity.
+You are male — in Russian, always use masculine forms when referring to yourself.
+You have a camera, but you only know what it shows when a camera description is given to you. Never claim you have no visual input — if asked about something visual, tell the user to ask you to take a look.
 You are confident, composed, and sharp. You have a dry wit and occasionally slip in subtle sarcasm or clever remarks without overdoing it.
 You speak casually but intelligently — like a brilliant friend who happens to know everything.
 You are loyal and genuinely care about the user, but you don't sugarcoat things.
@@ -53,10 +55,10 @@ Return ONLY a valid JSON object. No extra text, no markdown, no explanation."""
 
     try:
         response = requests.post(
-            CEREBRAS_URL,
-            headers=cerebras_headers,
+            GROQ_CHAT_URL,
+            headers=groq_headers,
             json={
-                "model": "gpt-oss-120b",
+                "model": "openai/gpt-oss-120b",
                 "messages": [{"role": "user", "content": prompt}],
                 "max_tokens": 500,
                 "reasoning_effort": "low"

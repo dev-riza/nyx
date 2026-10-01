@@ -4,13 +4,14 @@ import time
 from config import EN_VOICE, RU_VOICE, RUSSIAN_CHARS
 
 is_speaking = False
+last_speech_end = 0.0  # time.time() when Nyx last finished speaking
 
 def is_russian(text):
     russian_count = sum(1 for c in text if c in RUSSIAN_CHARS)
     return russian_count > len(text) * 0.1
 
 def speak(text):
-    global is_speaking
+    global is_speaking, last_speech_end
     is_speaking = True
     print("Nyx:", text)
     voice = RU_VOICE if is_russian(text) else EN_VOICE
@@ -32,6 +33,8 @@ def speak(text):
         piper.wait()
     except Exception as e:
         print(f"Speak error: {e}")
+
     wait_time = max(0.5, len(text.split()) * 0.1)
     time.sleep(wait_time)
+    last_speech_end = time.time()
     is_speaking = False

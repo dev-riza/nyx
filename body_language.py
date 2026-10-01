@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
-import numpy as np
 import os
-from ai_edge_litert.interpreter import Interpreter
-from PIL import Image
+import threading
+from ultralytics import YOLO
 
-MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models', 'movenet.tflite')
+# YOLOv8n-pose exported to NCNN (regenerate: YOLO('yolov8n-pose.pt').export(format='ncnn', imgsz=320))
+MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models', 'yolov8n-pose_ncnn_model')
+IMGSZ = 320
+PERSON_CONF = 0.5     # minimum confidence that a detection is a person
+KEYPOINT_CONF = 0.5   # minimum confidence to trust a single keypoint
 
-# Keypoint indices
+# Keypoint indices (COCO order). "Left"/"right" are the person's own sides.
 NOSE = 0
 LEFT_EYE = 1
 RIGHT_EYE = 2
@@ -25,139 +28,137 @@ RIGHT_KNEE = 14
 LEFT_ANKLE = 15
 RIGHT_ANKLE = 16
 
-_interp = None
+_model = None
+_model_lock = threading.Lock()  # presence thread and voice commands share the model
 
-def _get_interpreter():
-    global _interp
-    if _interp is None:
-        _interp = Interpreter(model_path=MODEL_PATH)
-        _interp.allocate_tensors()
-    return _interp
+def _get_model():
+    global _model
+    if _model is None:
+        _model = YOLO(MODEL_PATH, task='pose')
+    return _model
 
-def _run_pose(img_arr):
-    interp = _get_interpreter()
-    inp = interp.get_input_details()
-    out = interp.get_output_details()
-    
-    # Resize to 257x257
-    img = Image.fromarray(img_arr).transpose(Image.FLIP_LEFT_RIGHT).resize((257, 257))
-    img_np = (np.array(img, dtype=np.float32) / 255.0)[np.newaxis]    
-    interp.set_tensor(inp[0]['index'], img_np)
-    interp.invoke()
-    
-    # Output shape: [1, 9, 9, 17] - heatmaps
-    # We need to find peak locations
-    heatmaps = interp.get_tensor(out[0]['index'])[0]  # (9, 9, 17)
-    
-    keypoints = []
-    for kp_idx in range(17):
-        heatmap = heatmaps[:, :, kp_idx]
-        flat_idx = np.argmax(heatmap)
-        y_idx, x_idx = divmod(flat_idx, 9)
-        confidence = heatmap[y_idx, x_idx]
-        # Normalize to 0-1
-        y = y_idx / 8.0
-        x = x_idx / 8.0
-        keypoints.append((y, x, float(confidence)))
-    
-    return keypoints
+def detect_people(img_arr):
+    """Run pose detection on an RGB image array.
+
+    Returns a list of people, largest (closest) first. Each person is a list
+    of 17 (x, y, confidence) keypoints in image pixels."""
+    with _model_lock:
+        # Ultralytics expects BGR numpy arrays
+        result = _get_model()(img_arr[:, :, ::-1], imgsz=IMGSZ, conf=PERSON_CONF, verbose=False)[0]
+    if result.keypoints is None or result.boxes is None or len(result.boxes) == 0:
+        return []
+
+    xy = result.keypoints.xy.numpy()
+    conf = result.keypoints.conf.numpy() if result.keypoints.conf is not None else None
+    areas = result.boxes.xywh.numpy()[:, 2] * result.boxes.xywh.numpy()[:, 3]
+
+    people = []
+    for i in areas.argsort()[::-1]:
+        people.append([
+            (float(x), float(y), float(conf[i][k]) if conf is not None else 1.0)
+            for k, (x, y) in enumerate(xy[i])
+        ])
+    return people
+
+
+def _ok(kp, *idxs):
+    return all(kp[i][2] >= KEYPOINT_CONF for i in idxs)
+
 
 def analyze_body(img_arr):
     """
     Takes a numpy RGB image array.
-    Returns a dict with presence, posture, and gesture info.
+    Returns a dict with presence, posture, and gesture info for the main
+    (closest) person. Measurements are relative to shoulder width, so they
+    work at any distance from the camera.
     """
     results = {}
-    
+
     try:
-        kp = _run_pose(img_arr)
+        people = detect_people(img_arr)
     except Exception as e:
-        return {'present': False, 'summary': f'Error: {e}'}
-    
-    # Check confidence - is anyone there?
-    nose_conf = kp[NOSE][2]
-    shoulder_conf = (kp[LEFT_SHOULDER][2] + kp[RIGHT_SHOULDER][2]) / 2
-    
-    if nose_conf < 0.5 and shoulder_conf < 0.5:
-        results['present'] = False
-        results['summary'] = 'No person detected'
-        return results
-    
+        return {'present': False, 'people': 0, 'summary': f'Error: {e}'}
+
+    if not people:
+        return {'present': False, 'people': 0, 'summary': 'No person detected'}
+
     results['present'] = True
-    
-    # Head tilt - ear heights
-    left_ear_y = kp[LEFT_EAR][0]
-    right_ear_y = kp[RIGHT_EAR][0]
-    head_tilt = left_ear_y - right_ear_y
-    if abs(head_tilt) < 0.05:
-        results['head'] = 'level'
-    elif head_tilt > 0:
-        results['head'] = 'tilted right'
-    else:
-        results['head'] = 'tilted left'
-    
-    # Shoulder level
-    left_shoulder_y = kp[LEFT_SHOULDER][0]
-    right_shoulder_y = kp[RIGHT_SHOULDER][0]
-    shoulder_diff = abs(left_shoulder_y - right_shoulder_y)
-    results['shoulders'] = 'level' if shoulder_diff < 0.05 else 'uneven'
-    
-    # Posture lean - nose vs shoulder midpoint x
-    nose_x = kp[NOSE][1]
-    shoulder_mid_x = (kp[LEFT_SHOULDER][1] + kp[RIGHT_SHOULDER][1]) / 2
-    lean = nose_x - shoulder_mid_x
-    if abs(lean) < 0.05:
-        results['posture'] = 'centered'
-    elif lean > 0:
-        results['posture'] = 'leaning left'
-    else:
-        results['posture'] = 'leaning right'
-        
-    # Arms raised
-    left_wrist_y = kp[LEFT_WRIST][0]
-    right_wrist_y = kp[RIGHT_WRIST][0]
-    left_raised = left_wrist_y < left_shoulder_y - 0.05
-    right_raised = right_wrist_y < right_shoulder_y - 0.05
-    
-    if left_raised and right_raised:
-        results['arms'] = 'both raised'
-    elif left_raised:
-        results['arms'] = 'left arm raised'
-    elif right_raised:
-        results['arms'] = 'right arm raised'
-    else:
-        results['arms'] = 'at sides'
-    
-    # Slouching - shoulders vs hips
-    hip_y = (kp[LEFT_HIP][0] + kp[RIGHT_HIP][0]) / 2
-    shoulder_y = (left_shoulder_y + right_shoulder_y) / 2
-    results['slouching'] = shoulder_y > hip_y * 0.7
-    
+    results['people'] = len(people)
+    kp = people[0]
+    results['keypoints'] = kp
+
+    shoulders_ok = _ok(kp, LEFT_SHOULDER, RIGHT_SHOULDER)
+    if shoulders_ok:
+        scale = abs(kp[LEFT_SHOULDER][0] - kp[RIGHT_SHOULDER][0]) or 1.0
+        shoulder_y = (kp[LEFT_SHOULDER][1] + kp[RIGHT_SHOULDER][1]) / 2
+        shoulder_mid_x = (kp[LEFT_SHOULDER][0] + kp[RIGHT_SHOULDER][0]) / 2
+
+        # Shoulder level
+        shoulder_diff = abs(kp[LEFT_SHOULDER][1] - kp[RIGHT_SHOULDER][1]) / scale
+        results['shoulders'] = 'level' if shoulder_diff < 0.1 else 'uneven'
+
+        # Lean - nose offset from shoulder midpoint. The camera isn't mirrored,
+        # so the person's left is on the image's right (larger x).
+        if _ok(kp, NOSE):
+            lean = (kp[NOSE][0] - shoulder_mid_x) / scale
+            if abs(lean) < 0.2:
+                results['posture'] = 'centered'
+            elif lean > 0:
+                results['posture'] = 'leaning left'
+            else:
+                results['posture'] = 'leaning right'
+
+            # Slouching - head sunk down toward the shoulders. Hips are usually
+            # out of frame at a desk, so compare nose height to shoulder width.
+            results['slouching'] = (shoulder_y - kp[NOSE][1]) / scale < 0.35
+
+        # Arms raised - wrist above its shoulder
+        left_raised = _ok(kp, LEFT_WRIST) and kp[LEFT_WRIST][1] < kp[LEFT_SHOULDER][1]
+        right_raised = _ok(kp, RIGHT_WRIST) and kp[RIGHT_WRIST][1] < kp[RIGHT_SHOULDER][1]
+        if left_raised and right_raised:
+            results['arms'] = 'both raised'
+        elif left_raised:
+            results['arms'] = 'left arm raised'
+        elif right_raised:
+            results['arms'] = 'right arm raised'
+        else:
+            results['arms'] = 'down'
+
+    # Head tilt - ear heights relative to the distance between the ears
+    if _ok(kp, LEFT_EAR, RIGHT_EAR):
+        ear_dist = abs(kp[LEFT_EAR][0] - kp[RIGHT_EAR][0]) or 1.0
+        tilt = (kp[LEFT_EAR][1] - kp[RIGHT_EAR][1]) / ear_dist
+        if abs(tilt) < 0.15:
+            results['head'] = 'level'
+        elif tilt > 0:
+            results['head'] = 'tilted left'   # left ear lower
+        else:
+            results['head'] = 'tilted right'
+
     # Build summary
+    count = len(people)
+    summary = 'One person present.' if count == 1 else f'{count} people present.'
     parts = []
-    if results['arms'] != 'at sides':
+    if results.get('arms', 'down') != 'down':
         parts.append(results['arms'])
-    if results['posture'] != 'centered':
+    if results.get('posture', 'centered') != 'centered':
         parts.append(results['posture'])
-    if results['head'] != 'level':
+    if results.get('head', 'level') != 'level':
         parts.append('head ' + results['head'])
     if results.get('slouching'):
         parts.append('slouching')
-    
-    results['summary'] = 'Person present. ' + (', '.join(parts) if parts else 'Relaxed posture.')
-    results['keypoints'] = kp
-    
+    if not shoulders_ok:
+        parts.append('shoulders not visible, so posture is unclear')
+
+    results['summary'] = summary + ' ' + (', '.join(parts).capitalize() + '.' if parts else 'Upright, relaxed posture.')
     return results
 
 
 def quick_presence(img_arr):
     """Fast check - is someone in frame?"""
     try:
-        kp = _run_pose(img_arr)
-        nose_conf = kp[NOSE][2]
-        shoulder_conf = (kp[LEFT_SHOULDER][2] + kp[RIGHT_SHOULDER][2]) / 2
-        return nose_conf > 0.5 or shoulder_conf > 0.5
-    except:
+        return len(detect_people(img_arr)) > 0
+    except Exception:
         return False
 
 

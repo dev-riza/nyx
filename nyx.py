@@ -7,13 +7,15 @@ import re
 import wave
 import audioop
 import os
+import threading
 import webrtcvad
 
 from config import (
     GROQ_API_KEY, GROQ_CHAT_URL, GROQ_WHISPER_URL,
     groq_headers
 )
-from tts import speak, is_speaking
+import tts
+from tts import speak
 from timer import start_timer, check_timers, cancel_timers, is_timer_request, is_timer_check, is_timer_cancel, parse_timer
 from memory import load_memory, build_system_prompt, update_memory_from_session
 from search import web_search, needs_search
@@ -25,16 +27,20 @@ from body_language import PresenceMonitor, analyze_body
 def get_mic_device():
     result = subprocess.run(["arecord", "-l"], capture_output=True, text=True)
     for line in result.stdout.splitlines():
-        if "reSpeaker" in line or "XVF3800" in line:
+        if "reSpeaker" in line or "XVF3800" in line or "Seeed" in line:
             match = re.search(r"card (\d+)", line)
             if match:
                 return f"plughw:{match.group(1)},0"
-    for line in result.stdout.splitlines():
-        if "USB Audio" in line or "USB" in line:
-            match = re.search(r"card (\d+)", line)
-            if match:
-                return f"plughw:{match.group(1)},0"
-    return "plughw:1,0"
+    return "default"
+
+def wait_until_quiet(buffer=0.3):
+    while tts.is_speaking:
+        time.sleep(0.1)
+    time.sleep(buffer)
+
+def spoke_since(start):
+    # True if Nyx talked at any point after `start` (e.g. presence greeting mid-recording)
+    return tts.is_speaking or tts.last_speech_end > start
 
 def set_volume():
     os.system("amixer -c 0 sset 'Headphone' 90% > /dev/null 2>&1")
@@ -69,9 +75,17 @@ def clean_email(text):
     text = text.replace(" ", "")
     return text.strip()
 
+WAKE_PATTERN = r'\b(nyx|nix|niks|nyks|nics|nixon|nick|nicks|mix|niece|phoenix|next|naked|никс|никсон)\b'
+
+VISION_PATTERN = (
+    r"\b(do|can|could|did) you see\b|\bwhat (do|can) you see\b|\blook(ing)? (at|around)\b"
+    r"|\b(take|have) a look\b|\bwhat am i (wearing|holding|doing)\b|\bhow do i look\b"
+    r"|\bwhat(\s+is|'s) (this|that|in front)\b|\bdescribe (the room|me|what)\b|\bin front of you\b"
+    r"|видишь|посмотри|осмотрись|что на мне"
+)
+
 def contains_wake_word(text):
-    pattern = r'\b(nyx|nix|nick|nicks|mix|niece|phoenix|next|naked|никс)\b'
-    return bool(re.search(pattern, text))
+    return bool(re.search(WAKE_PATTERN, text))
 
 def check_in_on_mood():
     latest = emotion_monitor.latest
@@ -115,9 +129,12 @@ def process_command(user_input, messages):
             start_timer(seconds, label)
         else:
             speak("I didn't catch the time. Try saying something like set a timer for 5 minutes.")
-    elif any(word in user_input for word in ["what do you see", "look around", "what's in front", "describe the room", "что видишь", "осмотрись"]):
+    elif re.search(VISION_PATTERN, user_input):
         speak("Let me take a look...")
-        result = analyze_scene()
+        result = analyze_scene(
+            f"The user asked: \"{user_input}\". Answer their question based on this camera image "
+            f"in 2-3 short spoken sentences. If they ask about themselves, describe the person in view."
+        )
         speak(result)
     elif any(word in user_input for word in ["who's here", "who is here", "who's in the room", "is anyone here", "кто здесь"]):
         img = capture_frame()
@@ -268,17 +285,23 @@ def handle_send_email(messages):
         speak("I didn't catch that, email cancelled.")
 
 def record_audio_fixed(duration=3, samplerate=16000):
+    wait_until_quiet(0.5)
+    start = time.time()
     subprocess.run(
         ["arecord", "-D", MIC_DEVICE, "-f", "S16_LE",
          "-r", str(samplerate), "-c", "2", "-d", str(duration), "-q", "/tmp/audio.wav"],
         stderr=subprocess.DEVNULL
     )
+    if spoke_since(start):
+        return None
     return "/tmp/audio.wav"
 
-def record_with_vad(max_duration=15, samplerate=16000):
+def record_with_vad(max_duration=15, samplerate=16000, min_voiced_frames=10, min_rms=400):
+    wait_until_quiet(0.3)
+    start = time.time()
     vad = webrtcvad.Vad(3)
     frame_duration = 30
-    frame_size = int(samplerate * frame_duration / 1000) * 2
+    frame_size = int(samplerate * frame_duration / 1000) * 2 * 2  # stereo * 16bit
 
     arecord = subprocess.Popen(
         ["arecord", "-D", MIC_DEVICE, "-f", "S16_LE", "-r", str(samplerate), "-c", "2", "-q"],
@@ -297,8 +320,11 @@ def record_with_vad(max_duration=15, samplerate=16000):
         frame = arecord.stdout.read(frame_size)
         if len(frame) < frame_size:
             break
-        is_speech = vad.is_speech(frame, samplerate)
-        frames.append(frame)
+        if tts.is_speaking:
+            break
+        frame_mono = audioop.tomono(frame, 2, 0.5, 0.5)
+        is_speech = vad.is_speech(frame_mono, samplerate)
+        frames.append(frame_mono)
         if is_speech:
             voiced_frames += 1
             silent_frames = 0
@@ -310,7 +336,10 @@ def record_with_vad(max_duration=15, samplerate=16000):
                     break
 
     arecord.terminate()
-    if voiced_frames < 5:
+    if spoke_since(start) or voiced_frames < min_voiced_frames:
+        return None
+    # Quiet noise bursts get transcribed by Whisper as "thank you." etc.
+    if audioop.rms(b"".join(frames), 2) < min_rms:
         return None
 
     with wave.open("/tmp/audio.wav", "wb") as wf:
@@ -338,8 +367,12 @@ print(f"Using mic device: {MIC_DEVICE}")
 set_volume()
 
 # Presence monitor - body language based
+presence_wake = threading.Event()  # set when the greeting should start a conversation
+
 def on_person_enter():
+    wait_until_quiet(0.5)
     speak("Hey, welcome back.")
+    presence_wake.set()
 
 def on_person_leave():
     pass
@@ -361,19 +394,55 @@ messages = [
     {"role": "system", "content": build_system_prompt(memory)}
 ]
 
-print("Nyx is sleeping... say 'Nyx' to wake her up.")
+def conversation_loop(messages):
+    consecutive_silent = 0
+    while True:
+        print("Listening...")
+        filepath = record_with_vad(max_duration=15)
+
+        if filepath is None:
+            consecutive_silent += 1
+            if consecutive_silent >= 2:
+                print("No input detected, going back to sleep.")
+                speak("I am here if you need me.")
+                presence_wake.clear()  # ignore greetings that happened mid-conversation
+                return
+            continue
+
+        consecutive_silent = 0
+
+        try:
+            user_input = transcribe(filepath)
+        except Exception as e:
+            print(f"Transcription error: {e}")
+            continue
+
+        if not user_input:
+            continue
+
+        # Skip if transcription is just noise/punctuation
+        if len(user_input.strip('.?,! ')) < 3:
+            continue
+
+        process_command(user_input, messages)
+
+print("Nyx is sleeping... say 'Nyx' to wake him up.")
 
 try:
     while True:
-        import tts as tts_module
-        if tts_module.is_speaking:
+        if presence_wake.is_set():
+            presence_wake.clear()
+            conversation_loop(messages)
+            continue
+
+        if tts.is_speaking:
             time.sleep(0.1)
             continue
 
-        record_audio_fixed(duration=3)
+        filepath = record_audio_fixed(duration=3)
         check_in_on_mood()
 
-        if is_silent("/tmp/audio.wav"):
+        if filepath is None or is_silent(filepath):
             continue
 
         try:
@@ -390,44 +459,20 @@ try:
         if not contains_wake_word(text):
             continue
 
-        command = re.sub(r'\b(nyx|nix|nick|nicks|mix|niece|phoenix|next|naked|никс)\b', '', text).strip()
-        command = re.sub(r'^(hey|ok|okay|hi|hello)\s*', '', command).strip()
-        command = re.sub(r'^[,.\s]+', '', command).strip()
+        command = re.sub(WAKE_PATTERN, '', text)
+        command = re.sub(r'^[\W_]*(hey|ok|okay|hi|hello|хей|привет)\b', '', command)
+        command = command.strip(' ,.!?;:')
+        if len(command) < 3:
+            command = ""
 
         if command:
             process_command(command, messages)
         else:
             speak("Yes, I am here.")
 
-        consecutive_silent = 0
-        while True:
-            print("Listening...")
-            filepath = record_with_vad(max_duration=15)
+        presence_wake.clear()  # already in a conversation
+        conversation_loop(messages)
 
-            if filepath is None:
-                consecutive_silent += 1
-                if consecutive_silent >= 2:
-                    print("No input detected, going back to sleep.")
-                    speak("I am here if you need me.")
-                    break
-                continue
-
-            consecutive_silent = 0
-
-            try:
-                user_input = transcribe(filepath)
-            except Exception as e:
-                print(f"Transcription error: {e}")
-                continue
-
-            if not user_input:
-                continue
-
-# Skip if transcription is just noise/punctuation
-            if command and len(command.strip('.?,! ')) >= 2:
-                process_command(command, messages)
-
-    
 except KeyboardInterrupt:
     print("Stopping...")
 finally:
